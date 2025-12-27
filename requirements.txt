@@ -1,12 +1,9 @@
-ipykernel
-langchain-community
-langchain
-chromadb
-python-dotenv
-faiss-cpu
-beautifulsoup4
-spacy
 streamlit
 requests
 geopy
 python-dotenv
+shapely
+geopandas
+Pillow
+psycopg2-binary
+huggingface_hub
