@@ -1,17 +1,17 @@
 # planetAgent_deployed.py
 """
-Planet API Assistant (DEPLOYMENT READY)
+Planet API Assistant (FULL INTEGRATED DEPLOYMENT VERSION)
 
 Features:
-  - HUMANLIKE CHAT: Groq/Llama3
-  - PERSISTENT DB: Auto-switches between SQLite (Local) and PostgreSQL (Heroku/Cloud)
-  - PLANET SEARCH: Full Metadata search
-  - VLM ANALYSIS: Uses Hugging Face API (BLIP Model) instead of local Ollama
-  - GEOSPATIAL: Shapefile Upload (.zip) + Image Clipping
+  - SMART MEMORY: LLM sees current state + shapefile uploads immediately.
+  - UI: Upload button moved to main chat area (above input).
+  - DB: Hybrid SQLite (Local) / PostgreSQL (Cloud) with FULL SCHEMA.
+  - VLM: Hugging Face (BLIP) for image analysis.
+  - GEO: Shapefile support + Image Clipping.
 
 Usage:
-  - Local: Put PLANET_API_KEY, GROQ_API_KEY, and HF_TOKEN in .env
-  - Cloud: Set these as Config Vars in Heroku/Streamlit Cloud
+  - Local: .env with PLANET_API_KEY, GROQ_API_KEY, HF_TOKEN
+  - Cloud: Environment variables in Render/Heroku
 """
 import os
 import re
@@ -32,7 +32,7 @@ import geopandas as gpd
 from shapely.geometry import shape, box
 from PIL import Image
 
-# Try importing psycopg2 for Postgres (Cloud), fail silently if local only
+# Postgres import check for Cloud
 try:
     import psycopg2
 except ImportError:
@@ -42,7 +42,7 @@ except ImportError:
 load_dotenv()
 PLANET_API_KEY = os.getenv("PLANET_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN") # REQUIRED for VLM in Cloud
+HF_TOKEN = os.getenv("HF_TOKEN") 
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 try:
     LLM_TEMP = float(os.getenv("LLM_TEMP", "0.3"))
@@ -51,11 +51,10 @@ except Exception:
 
 st.set_page_config(page_title="Planet Assistant", layout="wide")
 
-# ---------- DB (HYBRID SQLITE / POSTGRES) ----------
+# ---------- DB (HYBRID & FULL SCHEMA) ----------
 DB_PATH = "planet_metadata.db"
 
 def get_db_connection():
-    """Connects to Postgres if DATABASE_URL is set, else SQLite."""
     db_url = os.getenv("DATABASE_URL")
     if db_url and psycopg2:
         return psycopg2.connect(db_url, sslmode='require')
@@ -65,9 +64,7 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # Postgres/SQLite compatible CREATE TABLE
-    # Note: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' works in both.
-    # 'REAL' works in both (maps to float4/8 in PG).
+    # RESTORED FULL SCHEMA
     query = """
         CREATE TABLE IF NOT EXISTS metadata (
             id TEXT PRIMARY KEY,
@@ -120,6 +117,7 @@ def save_metadata_to_db(metadata_list):
     conn = get_db_connection()
     c = conn.cursor()
     
+    # RESTORED FULL COLUMN MAPPING
     cols = [
         "id","item_type","acquired","anomalous_pixels","clear_confidence_percent",
         "clear_percent","cloud_cover","cloud_percent","ground_control","gsd",
@@ -130,17 +128,11 @@ def save_metadata_to_db(metadata_list):
         "visible_percent","geometry","full_metadata"
     ]
     
-    # DETERMINE PLACEHOLDER STYLE
-    # SQLite uses '?', Postgres uses '%s'
     is_postgres = bool(os.getenv("DATABASE_URL"))
     ph = "%s" if is_postgres else "?"
     placeholders = ",".join([ph]*len(cols))
     
     sql = f"INSERT INTO metadata ({','.join(cols)}) VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING"
-    # Note: "ON CONFLICT" works in Postgres 9.5+ and SQLite 3.24+. 
-    # If using older SQLite, use "INSERT OR IGNORE" but standardizing is tricky.
-    # For compatibility, we will try standard INSERT and ignore duplicate errors.
-    
     if not is_postgres:
          sql = f"INSERT OR REPLACE INTO metadata ({','.join(cols)}) VALUES ({placeholders})"
 
@@ -176,14 +168,12 @@ def save_metadata_to_db(metadata_list):
             p.get("view_angle"),
             p.get("visible_confidence_percent"),
             p.get("visible_percent"),
-            json.dumps(geom) if geom is not None else None,
+            json.dumps(geom) if geom else None,
             json.dumps(item)
         )
         try:
             c.execute(sql, row)
-        except Exception as e:
-            # print(f"DB Error: {e}") 
-            continue
+        except Exception: continue
     conn.commit()
     conn.close()
 
@@ -210,17 +200,16 @@ def _normalize_cloud_cover(val):
 
 def parse_geometry_input(value):
     if not value: return None
-    if isinstance(value, dict):
-        if value.get("type") and value.get("coordinates"): return value
-        return None
+    if isinstance(value, dict): return value
     s = str(value).strip()
     try:
         obj = json.loads(s)
-        if isinstance(obj, dict) and obj.get("type") and obj.get("coordinates"): return obj
-    except Exception: pass
-    m = re.search(r"\[?\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*\]?", s)
+        if isinstance(obj, dict) and obj.get("type"): return obj
+    except: pass
+    m = re.search(r"\[?\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*\]?", s)
     if m:
-        min_lon, min_lat, max_lon, max_lat = map(float, (m.group(1), m.group(2), m.group(3), m.group(4)))
+        v = list(map(float, m.groups()))
+        min_lon, min_lat, max_lon, max_lat = v[0], v[1], v[2], v[3]
         if min_lon > max_lon: min_lon, max_lon = max_lon, min_lon
         if min_lat > max_lat: min_lat, max_lat = max_lat, min_lat
         coords = [[min_lon, min_lat],[max_lon, min_lat],[max_lon, max_lat],[min_lon, max_lat],[min_lon, min_lat]]
@@ -235,274 +224,167 @@ def create_small_bbox_polygon_from_point(lat, lon, half_km=2.74):
     coords = [[min_lon, min_lat],[max_lon, min_lat],[max_lon, max_lat],[min_lon, max_lat],[min_lon, min_lat]]
     return {"type":"Polygon","coordinates":[coords]}
 
-# ---------- Shapefile Handling (PRESERVED) ----------
 def handle_shapefile_upload(uploaded_file):
     try:
         with tempfile.TemporaryDirectory() as tmpdirname:
             zip_path = os.path.join(tmpdirname, "uploaded.zip")
-            with open(zip_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(tmpdirname)
+            with open(zip_path, "wb") as f: f.write(uploaded_file.getbuffer())
+            with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(tmpdirname)
             
-            shp_file = None
-            for root, dirs, files in os.walk(tmpdirname):
-                for file in files:
-                    if file.endswith(".shp"):
-                        shp_file = os.path.join(root, file)
-                        break
-                if shp_file: break
-            
-            if not shp_file:
-                return None, "No .shp file found in the zip."
+            shp_file = next((os.path.join(r, f) for r, d, fs in os.walk(tmpdirname) for f in fs if f.endswith(".shp")), None)
+            if not shp_file: return None, "No .shp found"
             
             gdf = gpd.read_file(shp_file)
-            if gdf.crs != "EPSG:4326":
-                gdf = gdf.to_crs("EPSG:4326")
+            if gdf.crs != "EPSG:4326": gdf = gdf.to_crs("EPSG:4326")
             
             combined = gdf.unary_union
-            geom_json = json.loads(json.dumps(combined.__geo_interface__))
-            return geom_json, None
-            
-    except Exception as e:
-        return None, str(e)
+            return json.loads(json.dumps(combined.__geo_interface__)), None
+    except Exception as e: return None, str(e)
 
-# ---------- Robust JSON extraction ----------
-def find_first_json_substring(text: str):
-    if not text or not isinstance(text, str): return None
-    length = len(text)
-    for i,ch in enumerate(text):
-        if ch not in ('{','['): continue
-        start = i; stack=[ch]; in_str=False; esc=False
-        for j in range(i+1,length):
-            c = text[j]
-            if esc: esc=False; continue
-            if c == '\\': esc=True; continue
-            if c == '"' and not esc: in_str = not in_str; continue
-            if in_str: continue
-            if c == '{': stack.append('{')
-            elif c == '[': stack.append('[')
-            elif c == '}' and stack and stack[-1] == '{':
-                stack.pop()
-                if not stack: return text[start:j+1]
-            elif c == ']' and stack and stack[-1] == '[':
-                stack.pop()
-                if not stack: return text[start:j+1]
-    return None
-
-def extract_json_from_text(text: str):
-    if text is None: raise ValueError("empty text")
+# ---------- BRAIN: LLM EXTRACTOR ----------
+def extract_json_from_text(text):
     try:
-        parsed = json.loads(text); return parsed, text
-    except Exception:
-        pass
-    substr = find_first_json_substring(text)
-    if not substr: raise ValueError("No JSON found in LLM response.")
-    parsed = json.loads(substr)
-    return parsed, substr
+        start = text.find('{')
+        end = text.rfind('}') + 1
+        if start != -1 and end != 0: return json.loads(text[start:end]), text
+        return json.loads(text), text
+    except: return {}, text
 
-# ---------- LLM Extractor ----------
 class LLMExtractor:
-    def __init__(self, api_key, model=LLM_MODEL, temp=LLM_TEMP):
+    def __init__(self, api_key, model=LLM_MODEL):
         self.api_key = api_key
         self.model = model
-        self.temp = temp
 
-    def extract_and_reply(self, user_message: str, recent_history: list, assistant_state: dict):
-        if not self.api_key: raise RuntimeError("LLM API key not configured")
-        
+    def extract_and_reply(self, user_message, history, state):
+        if not self.api_key: return {"assistant_text": "Error: Key missing", "parsed":{}}
+
+        # SYSTEM PROMPT (Fixed Memory)
         system_prompt = (
-            "You are a warm, human receptionist-style assistant. Your job: TALK naturally and politely with the user, "
-            "and collect four filters: start_date, end_date, cloud_cover, geometry (bbox or GeoJSON). "
-            "If the user says they uploaded a shapefile, trust that 'geometry' is handled and move to other filters. "
-            "If data is missing, politely ask for just that missing information. "
-            "Output JSON keys: start_date, end_date, cloud_cover, geometry, place, decision (complete/ask/defaulted), reply."
+            "You are a smart satellite imagery assistant. Collect 4 filters: "
+            "start_date, end_date, cloud_cover, geometry.\n"
+            "CURRENT STATE: " + json.dumps(state) + "\n"
+            "RULES:\n"
+            "1. IF 'geometry' is in CURRENT STATE, DO NOT ask for it. Assume it is set.\n"
+            "2. If user mentions 'shapefile' or 'uploaded', assume geometry is handled.\n"
+            "3. Extract cloud cover from phrases like 'less than 0.25' or '10%'.\n"
+            "4. Only ask for missing fields. If all 4 exist, set 'decision'='complete'.\n"
+            "5. Output JSON with keys: start_date, end_date, cloud_cover, geometry, place, decision, reply."
         )
 
-        messages = [{"role":"system","content":system_prompt}]
-        for h in (recent_history or [])[-6:]: messages.append(h)
-        messages.append({"role":"user","content":f"assistant_state = {json.dumps(assistant_state)}\n\nuser_message = {json.dumps(user_message)}"})
-
-        payload = {"model": self.model, "messages": messages, "temperature": self.temp, "max_tokens": 600}
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type":"application/json"}
-        r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=40)
-        r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"]
-
-        parsed = None
-        try:
-            parsed, substr = extract_json_from_text(text)
-            if isinstance(parsed, list): parsed = parsed[0]
-        except Exception:
-            parsed = {"start_date":None,"end_date":None,"cloud_cover":None,"geometry":None,"place":None,"decision":"ask","reply":None}
-            dates = re.findall(r"\d{4}-\d{1,2}-\d{1,2}", text)
-            if dates:
-                parsed["start_date"] = dates[0]
-                if len(dates) > 1: parsed["end_date"] = dates[1]
-            parsed["reply"] = text.strip()[:400]
-
-        assistant_text = parsed.get("reply") or parsed.get("reasoning")
-        if not assistant_text: assistant_text = text.strip()
-
-        for k in ["start_date","end_date","cloud_cover","geometry","place","decision","clarify","reply","reasoning"]:
-            parsed.setdefault(k, None)
-        if parsed.get("decision") not in ("complete","ask","defaulted"): parsed["decision"] = "ask"
-        if not parsed.get("reply"): parsed["reply"] = assistant_text
-        return {"assistant_text": assistant_text, "parsed": parsed}
-
-# ---------- Planet Agent ----------
-class PlanetAIAgent:
-    def __init__(self, llm_api_key):
-        self.llm = LLMExtractor(llm_api_key)
-        self.geolocator = Nominatim(user_agent="planet-assistant")
-
-    def geocode_place(self, place_name):
-        try:
-            loc = self.geolocator.geocode(place_name, addressdetails=True)
-            if not loc: return None
-            raw = getattr(loc, "raw", {})
-            bbox = None
-            if "boundingbox" in raw:
-                try:
-                    south = float(raw["boundingbox"][0]); north = float(raw["boundingbox"][1])
-                    west = float(raw["boundingbox"][2]); east = float(raw["boundingbox"][3])
-                    bbox = (south, west, north, east)
-                except Exception: bbox = None
-            return {"lat": loc.latitude, "lon": loc.longitude, "bbox": bbox, "display_name": raw.get("display_name")}
-        except Exception: return None
-
-    def search_planet_metadata(self, filters: dict):
-        if not PLANET_API_KEY: raise RuntimeError("PLANET_API_KEY not configured")
-        if isinstance(filters.get("geometry"), str):
-            g = parse_geometry_input(filters["geometry"])
-            if g: filters["geometry"] = g
-        body = build_planet_api_body(filters)
-        if not body["filter"]["config"]: raise ValueError("No valid filters to search.")
-        url = "https://api.planet.com/data/v1/quick-search"
-        auth = (PLANET_API_KEY, "")
-        headers = {"Content-Type":"application/json"}
-        r = requests.post(url, auth=auth, headers=headers, json=body, timeout=90)
-        r.raise_for_status()
-        data = r.json()
-        features = data.get("features", [])
-        save_metadata_to_db(features)
-        return features
-
-    def handle_user_prompt(self, user_prompt: str):
-        if "assistant_state" not in st.session_state:
-            st.session_state.assistant_state = {"start_date":None,"end_date":None,"cloud_cover":None,"geometry":None,"place":None}
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-        
-        # Clear old results
-        if "features" in st.session_state: del st.session_state.features
-        if "active_preview" in st.session_state: del st.session_state.active_preview
-
-        st.session_state.chat_history.append({"role":"user","content":user_prompt})
-
-        if "shapefile_geometry" in st.session_state and st.session_state.shapefile_geometry:
-             st.session_state.assistant_state["geometry"] = st.session_state.shapefile_geometry
-
-        geom_direct = parse_geometry_input(user_prompt)
-        if geom_direct:
-            st.session_state.assistant_state["geometry"] = geom_direct
+        messages = [{"role":"system","content":system_prompt}] + (history or [])[-6:]
+        messages.append({"role":"user","content": f"User Input: {user_message}"})
 
         try:
-            out = self.llm.extract_and_reply(user_prompt, st.session_state.chat_history, st.session_state.assistant_state)
-        except Exception as e:
-            assistant_text = f"LLM error: {e}"
-            st.session_state.chat_history.append({"role":"assistant","content":assistant_text})
-            return {"status":"error","assistant_text":assistant_text}
-
-        assistant_text = out["assistant_text"]
-        parsed = out["parsed"]
-
-        st.session_state.chat_history.append({"role":"assistant","content":assistant_text})
-
-        state = st.session_state.assistant_state
-        if parsed.get("start_date"): state["start_date"] = parsed.get("start_date")
-        if parsed.get("end_date"): state["end_date"] = parsed.get("end_date")
-        if parsed.get("cloud_cover"): state["cloud_cover"] = parsed.get("cloud_cover")
-        if parsed.get("place"): state["place"] = parsed.get("place")
-        if parsed.get("geometry"):
-            gp = parsed.get("geometry")
-            gp_parsed = parse_geometry_input(gp) if isinstance(gp, str) else gp
-            if gp_parsed: state["geometry"] = gp_parsed
-
-        user_low = user_prompt.lower()
-        if any(p in user_low for p in ["assume", "don't have coordinates"]) and not state.get("geometry"):
-            place = state.get("place")
-            if place:
-                geo = self.geocode_place(place)
-                if geo:
-                    state["geometry"] = create_small_bbox_polygon_from_point(geo["lat"], geo["lon"])
-
-        if parsed.get("decision") == "complete":
-            filters = {
-                "start_date": state.get("start_date"),
-                "end_date": state.get("end_date"),
-                "cloud_cover": state.get("cloud_cover"),
-                "geometry": state.get("geometry")
-            }
-            return {"status":"ready","assistant_text":assistant_text,"filters":filters}
-
-        return {"status":"need_clarify","assistant_text":assistant_text,"missing": parsed.get("clarify")}
-
-def build_planet_api_body(filters: dict):
-    body = {"item_types":["PSScene"], "filter":{"type":"AndFilter","config":[]}}
-    start = _normalize_date_iso(filters.get("start_date"), "start")
-    end = _normalize_date_iso(filters.get("end_date"), "end")
-    if start and end and start > end: start, end = end, start
-    
-    date_config = {}
-    if start: date_config["gte"] = start
-    if end: date_config["lte"] = end
-    if date_config:
-        body["filter"]["config"].append({"type": "DateRangeFilter","field_name": "acquired","config": date_config})
-
-    cloud = _normalize_cloud_cover(filters.get("cloud_cover"))
-    if cloud is not None:
-        body["filter"]["config"].append({"type":"RangeFilter","field_name":"cloud_cover","config":{"lte":cloud}})
-    
-    geom = filters.get("geometry")
-    if isinstance(geom, dict):
-        body["filter"]["config"].append({"type":"GeometryFilter","field_name":"geometry","config":geom})
-    return body
-
-# ---------- Clipping & VLM (UPDATED FOR DEPLOYMENT) ----------
-def clip_image_to_geometry(image_bytes, image_geometry, clip_geometry):
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        img_shape = shape(image_geometry)
-        minx, miny, maxx, maxy = img_shape.bounds
-        clip_shape = shape(clip_geometry)
-        c_minx, c_miny, c_maxx, c_maxy = clip_shape.bounds
-
-        width, height = img.size
-        x_scale = width / (maxx - minx)
-        y_scale = height / (maxy - miny)
-        
-        left = int((c_minx - minx) * x_scale)
-        right = int((c_maxx - minx) * x_scale)
-        top = int((maxy - c_maxy) * y_scale)
-        bottom = int((maxy - c_miny) * y_scale)
-        
-        left = max(0, left)
-        top = max(0, top)
-        right = min(width, right)
-        bottom = min(height, bottom)
-        
-        if right <= left or bottom <= top:
-            return image_bytes 
+            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type":"application/json"}
+            payload = {"model": self.model, "messages": messages, "temperature": 0.3}
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=30)
+            text = r.json()["choices"][0]["message"]["content"]
             
-        cropped_img = img.crop((left, top, right, bottom))
-        buf = io.BytesIO()
-        cropped_img.save(buf, format="PNG")
-        return buf.getvalue()
+            parsed, _ = extract_json_from_text(text)
+            
+            # Regex Fallback for Cloud Cover
+            if not parsed.get("cloud_cover"):
+                m = re.search(r"(?:cloud|cover).*?([<>=]?\s*\d+(?:\.\d+)?)\s*(%|percent)?", user_message, re.I)
+                if m: parsed["cloud_cover"] = m.group(1).replace(" ", "")
 
-    except Exception as e:
-        print(f"Clipping error: {e}")
-        return image_bytes
+            assistant_text = parsed.get("reply") or text
+            if "{" in assistant_text and "}" in assistant_text:
+                try: 
+                    _, clean = extract_json_from_text(assistant_text)
+                    assistant_text = assistant_text.replace(clean, "").strip() 
+                    if assistant_text.startswith("{") or not assistant_text: assistant_text = "I've updated the filters."
+                except: pass
+
+            return {"assistant_text": assistant_text, "parsed": parsed}
+        except Exception as e:
+            return {"assistant_text": f"LLM Error: {e}", "parsed": {}}
+
+# ---------- CONTROLLER ----------
+class PlanetAIAgent:
+    def __init__(self, key):
+        self.llm = LLMExtractor(key)
+        self.geolocator = Nominatim(user_agent="planet-agent")
+
+    def geocode(self, place):
+        try:
+            loc = self.geolocator.geocode(place)
+            if loc: return {"lat": loc.latitude, "lon": loc.longitude}
+        except: return None
+        return None
+
+    def handle_turn(self, prompt):
+        # 1. Sync Uploaded Geometry to State
+        if "shapefile_geometry" in st.session_state and st.session_state.shapefile_geometry:
+            st.session_state.assistant_state["geometry"] = st.session_state.shapefile_geometry
+
+        # 2. Add User Msg
+        st.session_state.chat_history.append({"role":"user", "content": prompt})
+
+        # 3. Call LLM
+        res = self.llm.extract_and_reply(prompt, st.session_state.chat_history, st.session_state.assistant_state)
+        
+        # 4. Update State
+        state = st.session_state.assistant_state
+        p = res["parsed"]
+        for k in ["start_date", "end_date", "cloud_cover", "place"]:
+            if p.get(k): state[k] = p[k]
+        
+        if p.get("geometry"): state["geometry"] = parse_geometry_input(p["geometry"])
+
+        # 5. Handle Defaulting
+        if not state.get("geometry") and (p.get("decision")=="defaulted" or "assume" in prompt.lower()):
+            if state.get("place"):
+                loc = self.geocode(state["place"])
+                if loc: state["geometry"] = create_small_bbox_polygon_from_point(loc["lat"], loc["lon"])
+
+        st.session_state.chat_history.append({"role":"assistant", "content": res["assistant_text"]})
+
+        # 6. Check Ready
+        if p.get("decision") == "complete" or (state.get("geometry") and state.get("start_date") and state.get("end_date")):
+             return {"status": "ready", "filters": state}
+        return {"status": "chat"}
+
+    def search(self, filters):
+        # Build Body
+        body = {"item_types":["PSScene"], "filter":{"type":"AndFilter","config":[]}}
+        s = _normalize_date_iso(filters.get("start_date"), "start")
+        e = _normalize_date_iso(filters.get("end_date"), "end")
+        if s: body["filter"]["config"].append({"type":"DateRangeFilter","field_name":"acquired","config":{"gte":s}})
+        if e: body["filter"]["config"].append({"type":"DateRangeFilter","field_name":"acquired","config":{"lte":e}})
+        cc = _normalize_cloud_cover(filters.get("cloud_cover"))
+        if cc is not None: body["filter"]["config"].append({"type":"RangeFilter","field_name":"cloud_cover","config":{"lte":cc}})
+        if filters.get("geometry"): body["filter"]["config"].append({"type":"GeometryFilter","field_name":"geometry","config":filters["geometry"]})
+
+        url = "https://api.planet.com/data/v1/quick-search"
+        r = requests.post(url, auth=(PLANET_API_KEY, ""), json=body)
+        r.raise_for_status()
+        feats = r.json().get("features", [])
+        save_metadata_to_db(feats)
+        return feats
+
+# ---------- VLM & Clipping ----------
+def get_vlm_summary(img_bytes):
+    if not HF_TOKEN: return "Error: No HF Token."
+    api = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
+    try:
+        r = requests.post(api, headers={"Authorization": f"Bearer {HF_TOKEN}"}, data=img_bytes)
+        return r.json()[0].get("generated_text", "No caption")
+    except Exception as e: return f"VLM Error: {e}"
+
+def clip_image(img_bytes, img_geom, clip_geom):
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        b_img = shape(img_geom).bounds
+        b_clip = shape(clip_geom).bounds
+        w, h = img.size
+        x_scale = w / (b_img[2] - b_img[0])
+        y_scale = h / (b_img[3] - b_img[1])
+        left = int((b_clip[0] - b_img[0]) * x_scale)
+        top = int((b_img[3] - b_clip[3]) * y_scale)
+        right = int((b_clip[2] - b_img[0]) * x_scale)
+        bottom = int((b_img[3] - b_clip[1]) * y_scale)
+        return img.crop((max(0,left), max(0,top), min(w,right), min(h,bottom)))
+    except: return Image.open(io.BytesIO(img_bytes))
 
 def fetch_thumbnail(thumbnail_url, api_key):
     try:
@@ -510,74 +392,48 @@ def fetch_thumbnail(thumbnail_url, api_key):
         response = requests.get(thumbnail_url, auth=auth, timeout=30)
         response.raise_for_status()
         return response.content
-    except Exception as e:
-        print(f"Error fetching thumbnail: {e}")
-        return None
+    except Exception: return None
 
-def get_vlm_summary(image_bytes):
-    """
-    CLOUD VERSION: Uses Hugging Face API instead of local Ollama.
-    Model: Salesforce/blip-image-captioning-large (Free Tier Friendly)
-    """
-    if not HF_TOKEN:
-        return "⚠️ Error: HF_TOKEN missing. Cannot run VLM analysis."
-
-    API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-
-    try:
-        response = requests.post(API_URL, headers=headers, data=image_bytes, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        # HF Inference usually returns a list dict: [{'generated_text': '...'}]
-        if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
-            return data[0]["generated_text"]
-        
-        return "No caption generated."
-        
-    except Exception as e:
-        return f"Hugging Face API Error: {e}"
-
-# ---------- Streamlit UI ----------
+# ---------- UI ----------
 def main():
-    st.title("🌍 Planet API Assistant (Deployed Version)")
+    st.title("🌍 Planet API Assistant")
 
-    # Sidebar
-    st.sidebar.markdown("## Controls")
-    if st.sidebar.button("Start New Chat"):
-        for k in list(st.session_state.keys()): del st.session_state[k]
-        reset_db()
-        st.rerun()
-    
-    st.sidebar.markdown("### 1. Upload Area (Optional)")
-    uploaded_shp = st.sidebar.file_uploader("Upload .zip Shapefile", type="zip")
-    if uploaded_shp:
-        if "shapefile_geometry" not in st.session_state:
-            geom, err = handle_shapefile_upload(uploaded_shp)
-            if geom:
-                st.session_state.shapefile_geometry = geom
-                if "assistant_state" not in st.session_state: st.session_state.assistant_state = {}
-                st.session_state.assistant_state["geometry"] = geom
-                st.sidebar.success("✅ Shapefile loaded!")
-            else:
-                st.sidebar.error(f"Shapefile Error: {err}")
+    if "assistant_state" not in st.session_state: st.session_state.assistant_state = {}
+    if "chat_history" not in st.session_state: st.session_state.chat_history = []
+
+    # Sidebar for Reset
+    with st.sidebar:
+        if st.button("🗑️ Reset Chat"):
+            st.session_state.clear()
+            st.rerun()
 
     init_db()
     agent = PlanetAIAgent(GROQ_API_KEY)
-    
-    if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
+    # Main Area Upload
+    with st.expander("📎 Attach Shapefile / GeoJSON (Optional)", expanded=False):
+        uploaded = st.file_uploader("Upload .zip", type="zip", key="main_uploader")
+        if uploaded:
+            geom, err = handle_shapefile_upload(uploaded)
+            if geom:
+                st.session_state.shapefile_geometry = geom
+                st.success("✅ Geometry Attached! The assistant will see this.")
+            else:
+                st.error(err)
+
+    # Chat
     for msg in st.session_state.chat_history:
         st.chat_message(msg["role"]).write(msg["content"])
 
-    if user_text := st.chat_input("Ask about imagery..."):
-        result = agent.handle_user_prompt(user_text)
+    if prompt := st.chat_input("Ex: Show me images with < 10% clouds..."):
+        res = agent.handle_turn(prompt)
         st.rerun()
 
+    # Results
     if "features" in st.session_state:
         features = st.session_state.features
-        st.markdown(f"### Results ({len(features)})")
+        st.divider()
+        st.write(f"### Found {len(features)} images")
         
         c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
         c1.write("**ID**"); c2.write("**Date**"); c3.write("**Cloud**"); c4.write("**Action**")
@@ -591,33 +447,41 @@ def main():
             if col4.button("👁️", key=f["id"]):
                 t_url = f["_links"]["thumbnail"]
                 if t_url:
-                    with st.spinner("Fetching, Clipping & Analyzing (via Hugging Face)..."):
+                    with st.spinner("Analyzing..."):
                         raw_bytes = fetch_thumbnail(t_url, PLANET_API_KEY)
-                        
                         if raw_bytes:
                             final_image = raw_bytes
                             user_geom = st.session_state.assistant_state.get("geometry")
-                            feat_geom = f["geometry"]
-                            
                             if user_geom:
-                                final_image = clip_image_to_geometry(raw_bytes, feat_geom, user_geom)
+                                final_image = clip_image(raw_bytes, f["geometry"], user_geom)
                             
                             summary = get_vlm_summary(final_image)
-                            
                             st.session_state.active_preview = {
                                 "id": f["id"],
                                 "image": final_image,
                                 "summary": summary
                             }
                             st.rerun()
-                else:
-                    st.error("No thumbnail link.")
+                        else: st.error("No image found.")
 
-        if "active_preview" in st.session_state:
-            p = st.session_state.active_preview
-            with st.expander(f"Analysis: {p['id']}", expanded=True):
-                st.image(p["image"], caption="Clipped Thumbnail")
-                st.info(p["summary"])
+    if "active_preview" in st.session_state:
+        p = st.session_state.active_preview
+        with st.expander(f"Analysis: {p['id']}", expanded=True):
+            st.image(p["image"], caption="Thumbnail")
+            st.info(p["summary"])
+
+    # Auto-Search
+    state = st.session_state.assistant_state
+    if state.get("geometry") and state.get("start_date") and "features" not in st.session_state:
+        last = st.session_state.chat_history[-1] if st.session_state.chat_history else {}
+        if last.get("role") == "assistant" and "decision" not in last: 
+            with st.spinner("Filters complete. Searching Planet API..."):
+                try:
+                    feats = agent.search(state)
+                    st.session_state.features = feats
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Search Error: {e}")
 
 if __name__ == "__main__":
     main()
