@@ -1,11 +1,12 @@
 # planetAgent_full_fixed.py
 """
 Planet API Assistant (humanlike/receptionist style)
+WITH SHAPEFILE UPLOAD AND CLIP-AND-SHIP ORDERING
 
 Usage:
   - Put PLANET_API_KEY and GROQ_API_KEY in .env
-  - Optionally set LLM_MODEL and LLM_TEMP in .env (defaults provided)
   - Run: streamlit run planetAgent_full_fixed.py
+  - REQUIRES: OLLAMA (for VLM) and 'pip install geopandas shapely'
 """
 import os
 import re
@@ -13,10 +14,19 @@ import json
 import sqlite3
 import requests
 import streamlit as st
+import base64
+import tempfile
+import zipfile
+import shutil
+# --- New Imports for Shapefile ---
+import geopandas as gpd
+from shapely.geometry import mapping, shape
+# ---------------------------------
 from geopy.geocoders import Nominatim
 from math import cos, radians, sqrt
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from requests.auth import HTTPBasicAuth
 
 # ---------- Load env ----------
 load_dotenv()
@@ -30,7 +40,7 @@ except Exception:
 
 st.set_page_config(page_title="Planet Assistant", layout="wide")
 
-# ---------- DB ----------
+# ---------- DB (ORIGINAL FULL SCHEMA) ----------
 DB_PATH = "planet_metadata.db"
 
 def init_db():
@@ -81,7 +91,7 @@ def reset_db():
     c.execute("DROP TABLE IF EXISTS metadata")
     conn.commit()
     conn.close()
-    init_db() # Recreate the empty table for the new session
+    init_db()
 
 def save_metadata_to_db(metadata_list):
     if not metadata_list:
@@ -142,7 +152,117 @@ def save_metadata_to_db(metadata_list):
     conn.commit()
     conn.close()
 
-# ---------- Helpers ----------
+# ---------- Helpers (ORIGINAL + NEW) ----------
+
+# --- NEW FUNCTIONALITY 1: SHAPEFILE PROCESSING ---
+def process_uploaded_shapefile(uploaded_file):
+    """
+    Extracts geometry from an uploaded ZIP (Shapefile).
+    Returns a GeoJSON dict of the first polygon found.
+    """
+    try:
+        # Create a temp directory
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            zip_path = os.path.join(tmpdirname, "upload.zip")
+            with open(zip_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Extract
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(tmpdirname)
+            
+            # Find .shp file
+            shp_file = None
+            for root, dirs, files in os.walk(tmpdirname):
+                for file in files:
+                    if file.endswith(".shp"):
+                        shp_file = os.path.join(root, file)
+                        break
+                if shp_file: break
+            
+            if not shp_file:
+                return None, "No .shp file found in the ZIP."
+
+            # Read with Geopandas
+            gdf = gpd.read_file(shp_file)
+            
+            # Ensure CRS is WGS84 (EPSG:4326) for Planet API
+            if gdf.crs is not None and gdf.crs.to_string() != "EPSG:4326":
+                gdf = gdf.to_crs("EPSG:4326")
+            
+            # Get first geometry
+            if gdf.empty:
+                return None, "Shapefile is empty."
+            
+            # Simplify geometry if too complex
+            geom = gdf.geometry.iloc[0]
+            # Simple check for complexity to avoid API errors
+            if hasattr(geom, 'wkt') and len(geom.wkt) > 5000: 
+                 geom = geom.simplify(tolerance=0.001, preserve_topology=True)
+                 
+            # Convert to GeoJSON structure (dict)
+            geojson = mapping(geom)
+            
+            return geojson, None
+
+    except Exception as e:
+        return None, str(e)
+
+# --- NEW FUNCTIONALITY 2: CLIP & SHIP ORDER ---
+def place_planet_order(scene_ids, aoi_geometry, order_name="Composite Order"):
+    """
+    Submits an order to Planet API to Clip and Composite the images.
+    """
+    if not PLANET_API_KEY:
+        return {"success": False, "error": "API Key missing"}
+
+    url = 'https://api.planet.com/compute/ops/orders/v2'
+    
+    # Define tools: Clip (using AOI) + Composite
+    tools = [
+        {
+            "clip": {
+                "aoi": aoi_geometry
+            }
+        },
+        {
+            "composite": {}
+        }
+    ]
+
+    # Define payload
+    payload = {
+        "name": order_name,
+        "source_type": "scenes",
+        "products": [
+            {
+                "item_ids": scene_ids,
+                "item_type": "PSScene",
+                "product_bundle": "analytic_udm2" 
+            }
+        ],
+        "tools": tools
+    }
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            auth=HTTPBasicAuth(PLANET_API_KEY, ""),
+            headers={"Content-Type": "application/json"}
+        )
+        
+        # 202 Accepted is the standard success code for orders
+        if response.status_code == 202:
+            return {"success": True, "data": response.json()}
+        elif response.status_code == 200:
+             return {"success": True, "data": response.json()}
+        else:
+            return {"success": False, "error": f"Status {response.status_code}: {response.text}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# --- ORIGINAL HELPERS ---
 def _normalize_date_iso(date_str, which="start"):
     if not date_str:
         return None
@@ -195,14 +315,6 @@ def parse_geometry_input(value):
         ]
         return {"type":"Polygon","coordinates":[coords]}
     return None
-
-def area_km2_from_bbox(min_lat, min_lon, max_lat, max_lon):
-    center_lat = (min_lat + max_lat)/2.0
-    height_deg = max_lat - min_lat
-    width_deg = max_lon - min_lon
-    height_km = abs(height_deg)*111.0
-    width_km = abs(width_deg)*111.0*abs(cos(radians(center_lat)))
-    return abs(width_km*height_km)
 
 def create_small_bbox_polygon_from_point(lat, lon, half_km=2.74): # Default set to ~30km^2
     deg_lat = half_km / 111.0
@@ -260,6 +372,8 @@ class LLMExtractor:
         system_prompt = (
             "You are a warm, human receptionist-style assistant. Your job: TALK naturally and politely with the user, "
             "and collect four filters: start_date, end_date, cloud_cover, geometry (bbox or GeoJSON). "
+            "Check 'assistant_state' to see what we already have. "
+            "If the user uploaded a Shapefile, geometry will already be in assistant_state. Do NOT ask for it again if it is there. "
             "If data is missing, politely ask for just that missing information (one question at a time). "
             "If the user gives a broad place (like a large city or state), you MUST ask for a more specific area, district, locality, or coordinates. Do not proceed without a more specific location unless the user explicitly tells you to 'assume' a central point. "
             "If the user explicitly says 'I don't have coordinates' or 'assume', you may set decision='defaulted' and assume a small area of about 30 km²."
@@ -274,7 +388,6 @@ class LLMExtractor:
         )
 
         messages = [{"role":"system","content":system_prompt}]
-        # ===== FIX 2: Correctly append history messages with their original roles =====
         for h in (recent_history or [])[-6:]:
             messages.append(h)
             
@@ -297,24 +410,18 @@ class LLMExtractor:
         parsed = None
         try:
             parsed, substr = extract_json_from_text(text)
-            
-            # ===== FIX 1: Handle case where LLM returns a JSON array instead of an object =====
             if isinstance(parsed, list):
                 if parsed and isinstance(parsed[0], dict):
-                    parsed = parsed[0] # Take the first object from the array
+                    parsed = parsed[0] 
                 else:
-                    # Fallback if it's an empty list or not a list of objects
                     raise ValueError("LLM returned a JSON array that could not be handled.")
-
         except Exception:
             # fallback heuristics
             parsed = {"start_date":None,"end_date":None,"cloud_cover":None,"geometry":None,"place":None,"decision":"ask","clarify":None,"reply":None,"reasoning":None}
-            # detect dates (YYYY-MM-DD)
             dates = re.findall(r"\d{4}-\d{1,2}-\d{1,2}", text)
             if dates:
                 parsed["start_date"] = dates[0]
                 if len(dates) > 1: parsed["end_date"] = dates[1]
-            # bbox detection
             bbox = parse_geometry_input(text) or parse_geometry_input(user_message)
             if bbox:
                 parsed["geometry"] = bbox; parsed["decision"] = "complete"
@@ -398,6 +505,12 @@ class PlanetAIAgent:
             st.session_state.assistant_state = {"start_date":None,"end_date":None,"cloud_cover":None,"geometry":None,"place":None}
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
+        
+        # ===== FIX: Clear old results on a new user prompt =====
+        if "features" in st.session_state:
+            del st.session_state.features
+        if "active_preview" in st.session_state:
+            del st.session_state.active_preview
 
         # append user message to history
         st.session_state.chat_history.append({"role":"user","content":user_prompt})
@@ -506,16 +619,93 @@ def build_planet_api_body(filters: dict):
     
     return body
 
+# ===== ORIGINAL HELPER FUNCTIONS for Preview & Summary =====
+
+def fetch_thumbnail(thumbnail_url, api_key):
+    """Securely fetches the thumbnail image from Planet's API."""
+    try:
+        auth = HTTPBasicAuth(api_key, "")
+        response = requests.get(thumbnail_url, auth=auth, timeout=30)
+        response.raise_for_status()
+        return response.content  # Return the raw image bytes
+    except Exception as e:
+        print(f"Error fetching thumbnail: {e}")
+        return None
+
+def get_vlm_summary(image_bytes):
+    """Sends image bytes to a local Ollama LLaVA server and gets a summary."""
+    try:
+        # Encode the image bytes to base64
+        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        ollama_url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": "llava", # Assumes 'llava' model is pulled in Ollama
+            "prompt": "Describe this satellite image in a single, concise paragraph.",
+            "images": [encoded_image],
+            "stream": False # We want the full response at once
+        }
+        
+        # This request might take several seconds depending on your GPU
+        response = requests.post(ollama_url, json=payload, timeout=60)
+        response.raise_for_status()
+        
+        # The response from Ollama is a JSON, summary is in the 'response' key
+        summary = response.json().get("response", "No summary could be generated.")
+        return summary.strip()
+    
+    except requests.exceptions.ConnectionError:
+        return "Error: Could not connect to the Ollama server. (Is it running?)"
+    except Exception as e:
+        print(f"Error getting VLM summary: {e}")
+        return f"Error during VLM summary: {e}"
+
 # ---------- Streamlit UI ----------
 def main():
-    st.title("🌍 Planet API Assistant (conversational)")
+    st.title("🌍 Planet API Assistant (Conversational + Advanced Tools)")
+
+    # Initialize State
+    if "assistant_state" not in st.session_state:
+        st.session_state.assistant_state = {"start_date":None,"end_date":None,"cloud_cover":None,"geometry":None,"place":None}
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
     # Sidebar
     st.sidebar.markdown("## Controls")
+    
+    # ===== NEW: SHAPEFILE UPLOADER IN SIDEBAR =====
+    st.sidebar.markdown("### 📁 Shapefile Upload")
+    uploaded_file = st.sidebar.file_uploader("Upload .zip (containing .shp)", type="zip", key="shp_upload")
+    
+    if uploaded_file is not None:
+        # Avoid reprocessing on every rerun if it's the same file
+        if st.session_state.get("last_uploaded_shp") != uploaded_file.name:
+            with st.sidebar.status("Processing Shapefile..."):
+                geom_data, error_msg = process_uploaded_shapefile(uploaded_file)
+                if geom_data:
+                    st.session_state.assistant_state["geometry"] = geom_data
+                    st.session_state["last_uploaded_shp"] = uploaded_file.name
+                    
+                    # Context Injection
+                    st.session_state.chat_history.append({
+                        "role": "user", 
+                        "content": "System Update: I have uploaded a Shapefile. The geometry is now set."
+                    })
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": "I've received your Shapefile and set the Area of Interest. Please provide dates or cloud cover preferences if you haven't already."
+                    })
+                    st.success("Shapefile loaded!")
+                    st.rerun()
+                else:
+                    st.error(f"Error: {error_msg}")
+    
+    st.sidebar.markdown("---")
+    
     if st.sidebar.button("Start New Chat (clear conversation & filters)"):
-        for k in ["chat_history", "assistant_state"]:
-            if k in st.session_state:
-                del st.session_state[k]
+        # ===== FIX: Clear all session state keys on reset =====
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
         reset_db()
         st.rerun()
     st.sidebar.markdown(f"LLM model: {LLM_MODEL} — temp: {LLM_TEMP}")
@@ -523,14 +713,12 @@ def main():
     init_db()
     agent = PlanetAIAgent(GROQ_API_KEY)
 
-    # Initialize history if it doesn't exist
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
     # Display the existing chat history
     for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        # Optional: Hide the system injection messages if you prefer cleaner UI
+        if not msg["content"].startswith("System Update"):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
             
     # Handle new user input
     if user_text := st.chat_input("Ask about satellite imagery (dates/cloud/geometry/place)..."):
@@ -538,7 +726,6 @@ def main():
         result = agent.handle_user_prompt(user_text)
 
         # After the agent has updated history, display the new messages manually for instant feedback
-        # The user's message is at [-2], assistant's is at [-1]
         with st.chat_message("user"):
             st.markdown(st.session_state.chat_history[-2]['content'])
         
@@ -560,21 +747,131 @@ def main():
                 features = agent.search_planet_metadata(filters)
                 count = len(features)
                 st.success(f"✅ Retrieved {count} features. Saved to {DB_PATH}.")
+                
                 if count == 0:
                     st.info("No features returned for these filters.")
+                    if "features" in st.session_state:
+                        del st.session_state.features # Clear old results if any
                 else:
-                    preview = [{
-                        "id": f.get("id"),
-                        "acquired": (p := f.get("properties", {})).get("acquired"),
-                        "cloud_cover": p.get("cloud_cover"),
-                        "satellite": p.get("satellite_id") or p.get("item_type")
-                    } for f in features[:100]]
-                    st.markdown("**Preview (first 100 results):**")
-                    st.table(preview)
+                    # ===== FIX: Save features to session state to survive reruns =====
+                    st.session_state.features = features
+                
             except Exception as e:
                 st.error(f"Planet API error: {e}")
+                if "features" in st.session_state:
+                    del st.session_state.features
+        
         elif result.get("status") == "error":
             st.error(result.get("assistant_text") or "LLM/Agent error")
+
+    # ===== RESULTS & NEW ORDERING FUNCTIONALITY =====
+    # This block will now run on *every* script rerun
+    if "features" in st.session_state:
+        features = st.session_state.features
+        
+        # --- NEW: Clip & Ship Order Interface ---
+        st.markdown("---")
+        st.subheader("🛠️ Create Secure Composite Order (Clip & Ship)")
+        
+        with st.expander("Order Options", expanded=True):
+            # 1. Select Scenes
+            all_ids = [f["id"] for f in features[:50]] # Limit to 50 for UI performance
+            selected_ids = st.multiselect(
+                "Select Scenes to Composite:", 
+                options=all_ids,
+                help="Choose scenes to clip to your AOI and composite together."
+            )
+            
+            # 2. Confirm AOI
+            current_aoi = st.session_state.assistant_state.get("geometry")
+            if not current_aoi:
+                st.warning("⚠️ No Area of Interest (AOI) found. Cannot clip.")
+                order_ready = False
+            else:
+                st.success("✅ AOI available for clipping.")
+                order_ready = True
+            
+            # 3. Place Order Button
+            if st.button("Place Clip & Composite Order", disabled=not (selected_ids and order_ready)):
+                with st.spinner("Submitting order to Planet..."):
+                    order_result = place_planet_order(
+                        scene_ids=selected_ids,
+                        aoi_geometry=current_aoi,
+                        order_name=f"Composite_{len(selected_ids)}_scenes"
+                    )
+                    
+                    if order_result["success"]:
+                        st.balloons()
+                        st.success(f"✅ Order Created! ID: {order_result['data'].get('id')}")
+                        st.json(order_result["data"])
+                    else:
+                        st.error(f"❌ Order Failed: {order_result['error']}")
+
+        # --- ORIGINAL: Results Table ---
+        st.markdown("---")
+        st.markdown("### Search Results (first 100)")
+        
+        preview_list = []
+        for f in features[:100]:
+            properties = f.get("properties", {})
+            links = f.get("_links", {})
+            preview_list.append({
+                "id": f.get("id"),
+                "acquired": properties.get("acquired"),
+                "cloud_cover": properties.get("cloud_cover"),
+                "satellite": properties.get("satellite_id") or properties.get("item_type"),
+                "thumbnail_url": links.get("thumbnail") # Get the thumbnail URL
+            })
+        
+        # Create the header row
+        cols = st.columns([3, 3, 2, 2, 1])
+        cols[0].markdown("**ID**")
+        cols[1].markdown("**Acquired**")
+        cols[2].markdown("**Cloud Cover**")
+        cols[3].markdown("**Satellite**")
+        cols[4].markdown("**Preview**")
+
+        # Loop through each item and create a row with a button
+        for item in preview_list:
+            col1, col2, col3, col4, col5 = st.columns([3, 3, 2, 2, 1])
+            col1.write(item.get("id"))
+            col2.write(item.get("acquired"))
+            col3.write(item.get("cloud_cover"))
+            col4.write(item.get("satellite"))
+            
+            if col5.button("👁️", key=item.get("id")):
+                # This block runs when the button is clicked
+                thumbnail_url = item.get("thumbnail_url")
+                if thumbnail_url:
+                    with st.spinner("Fetching image and generating summary... (this may take a moment)"):
+                        # 1. Fetch Image
+                        image_bytes = fetch_thumbnail(thumbnail_url, PLANET_API_KEY)
+                        
+                        if image_bytes:
+                            # 2. Get VLM Summary
+                            summary = get_vlm_summary(image_bytes)
+                            
+                            # 3. Save data to session state to display *after* rerun
+                            st.session_state.active_preview = {
+                                "id": item.get("id"),
+                                "image_bytes": image_bytes,
+                                "summary": summary
+                            }
+                            # Force an immediate rerun to show the expander
+                            st.rerun() 
+                        else:
+                            st.error("Could not fetch thumbnail image from Planet API.")
+                else:
+                    st.error("No thumbnail URL found for this item.")
+        
+        # Display the active preview (if one is set in state)
+        if "active_preview" in st.session_state:
+            preview_data = st.session_state.active_preview
+            with st.expander(f"Preview & Summary for {preview_data['id']}", expanded=True):
+                st.image(preview_data["image_bytes"], caption="Image Thumbnail")
+                st.markdown("---")
+                st.markdown("**VLM Summary:**")
+                st.write(preview_data["summary"])
 
 if __name__ == "__main__":
     main()

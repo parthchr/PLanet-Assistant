@@ -1,17 +1,14 @@
 # planetAgent_deployed.py
 """
-Planet API Assistant (FULL INTEGRATED DEPLOYMENT VERSION)
+Planet API Assistant (FINAL COMPLETE INTEGRATED VERSION)
 
-Features:
-  - SMART MEMORY: LLM sees current state + shapefile uploads immediately.
-  - UI: Upload button moved to main chat area (above input).
-  - DB: Hybrid SQLite (Local) / PostgreSQL (Cloud) with FULL SCHEMA.
-  - VLM: Hugging Face (BLIP) for image analysis.
-  - GEO: Shapefile support + Image Clipping.
-
-Usage:
-  - Local: .env with PLANET_API_KEY, GROQ_API_KEY, HF_TOKEN
-  - Cloud: Environment variables in Render/Heroku
+Features Included:
+  1. LARGE SHAPEFILE FIX: Prevents API Error 400 by hiding massive coords from LLM context.
+  2. BRIDGE LOGIC: Injects "SYSTEM ALERT" so LLM knows when a file is uploaded.
+  3. CONVERSATIONAL: Friendly receptionist persona.
+  4. FULL DATABASE: Preserves all 30+ metadata columns (Sun Azimuth, GSD, etc.).
+  5. VLM & CLIPPING: Hugging Face analysis + Geometry clipping.
+  6. HYBRID DB: Auto-switches between SQLite (Local) and PostgreSQL (Cloud).
 """
 import os
 import re
@@ -32,26 +29,22 @@ import geopandas as gpd
 from shapely.geometry import shape, box
 from PIL import Image
 
-# Postgres import check for Cloud
+# Cloud Database Support
 try:
     import psycopg2
 except ImportError:
     psycopg2 = None
 
-# ---------- Load env ----------
+# ---------- Load Configuration ----------
 load_dotenv()
 PLANET_API_KEY = os.getenv("PLANET_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN") 
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-try:
-    LLM_TEMP = float(os.getenv("LLM_TEMP", "0.3"))
-except Exception:
-    LLM_TEMP = 0.3
 
 st.set_page_config(page_title="Planet Assistant", layout="wide")
 
-# ---------- DB (HYBRID & FULL SCHEMA) ----------
+# ---------- DB SECTION (FULL SCHEMA) ----------
 DB_PATH = "planet_metadata.db"
 
 def get_db_connection():
@@ -63,8 +56,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    
-    # RESTORED FULL SCHEMA
+    # FULL SCHEMA RESTORED
     query = """
         CREATE TABLE IF NOT EXISTS metadata (
             id TEXT PRIMARY KEY,
@@ -104,20 +96,12 @@ def init_db():
     conn.commit()
     conn.close()
 
-def reset_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DROP TABLE IF EXISTS metadata")
-    conn.commit()
-    conn.close()
-    init_db()
-
 def save_metadata_to_db(metadata_list):
     if not metadata_list: return
     conn = get_db_connection()
     c = conn.cursor()
     
-    # RESTORED FULL COLUMN MAPPING
+    # FULL COLUMN MAPPING RESTORED
     cols = [
         "id","item_type","acquired","anomalous_pixels","clear_confidence_percent",
         "clear_percent","cloud_cover","cloud_percent","ground_control","gsd",
@@ -140,44 +124,22 @@ def save_metadata_to_db(metadata_list):
         p = item.get("properties", {}) or {}
         geom = item.get("geometry")
         row = (
-            item.get("id"),
-            p.get("item_type"),
-            p.get("acquired"),
-            p.get("anomalous_pixels"),
-            p.get("clear_confidence_percent"),
-            p.get("clear_percent"),
-            p.get("cloud_cover"),
-            p.get("cloud_percent"),
-            p.get("ground_control"),
-            p.get("gsd"),
-            p.get("heavy_haze_percent"),
-            p.get("instrument"),
-            p.get("pixel_resolution"),
-            p.get("provider"),
-            p.get("published"),
-            p.get("publishing_stage"),
-            p.get("quality_category"),
-            p.get("satellite_azimuth"),
-            p.get("satellite_id"),
-            p.get("shadow_percent"),
-            p.get("snow_ice_percent"),
-            p.get("strip_id"),
-            p.get("sun_azimuth"),
-            p.get("sun_elevation"),
-            p.get("updated"),
-            p.get("view_angle"),
-            p.get("visible_confidence_percent"),
-            p.get("visible_percent"),
-            json.dumps(geom) if geom else None,
-            json.dumps(item)
+            item.get("id"), p.get("item_type"), p.get("acquired"), p.get("anomalous_pixels"),
+            p.get("clear_confidence_percent"), p.get("clear_percent"), p.get("cloud_cover"),
+            p.get("cloud_percent"), p.get("ground_control"), p.get("gsd"), p.get("heavy_haze_percent"),
+            p.get("instrument"), p.get("pixel_resolution"), p.get("provider"), p.get("published"),
+            p.get("publishing_stage"), p.get("quality_category"), p.get("satellite_azimuth"),
+            p.get("satellite_id"), p.get("shadow_percent"), p.get("snow_ice_percent"), p.get("strip_id"),
+            p.get("sun_azimuth"), p.get("sun_elevation"), p.get("updated"), p.get("view_angle"),
+            p.get("visible_confidence_percent"), p.get("visible_percent"),
+            json.dumps(geom) if geom else None, json.dumps(item)
         )
-        try:
-            c.execute(sql, row)
+        try: c.execute(sql, row)
         except Exception: continue
     conn.commit()
     conn.close()
 
-# ---------- Helpers ----------
+# ---------- HELPERS ----------
 def _normalize_date_iso(date_str, which="start"):
     if not date_str: return None
     s = str(date_str).strip()
@@ -230,13 +192,10 @@ def handle_shapefile_upload(uploaded_file):
             zip_path = os.path.join(tmpdirname, "uploaded.zip")
             with open(zip_path, "wb") as f: f.write(uploaded_file.getbuffer())
             with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(tmpdirname)
-            
             shp_file = next((os.path.join(r, f) for r, d, fs in os.walk(tmpdirname) for f in fs if f.endswith(".shp")), None)
             if not shp_file: return None, "No .shp found"
-            
             gdf = gpd.read_file(shp_file)
             if gdf.crs != "EPSG:4326": gdf = gdf.to_crs("EPSG:4326")
-            
             combined = gdf.unary_union
             return json.loads(json.dumps(combined.__geo_interface__)), None
     except Exception as e: return None, str(e)
@@ -258,46 +217,73 @@ class LLMExtractor:
     def extract_and_reply(self, user_message, history, state):
         if not self.api_key: return {"assistant_text": "Error: Key missing", "parsed":{}}
 
-        # SYSTEM PROMPT (Fixed Memory)
+        # --- MEMORY SANITIZATION (The Fix for Error 400) ---
+        # We assume the LLM cannot handle 10,000 coordinates.
+        # We give it a "Shadow Copy" of the state where geometry is just a flag.
+        llm_safe_state = state.copy()
+        if llm_safe_state.get("geometry"):
+            llm_safe_state["geometry"] = "<<VALID_GEOMETRY_ATTACHED>>"
+
+        # --- SYSTEM PROMPT ---
         system_prompt = (
-            "You are a smart satellite imagery assistant. Collect 4 filters: "
-            "start_date, end_date, cloud_cover, geometry.\n"
-            "CURRENT STATE: " + json.dumps(state) + "\n"
-            "RULES:\n"
-            "1. IF 'geometry' is in CURRENT STATE, DO NOT ask for it. Assume it is set.\n"
-            "2. If user mentions 'shapefile' or 'uploaded', assume geometry is handled.\n"
-            "3. Extract cloud cover from phrases like 'less than 0.25' or '10%'.\n"
-            "4. Only ask for missing fields. If all 4 exist, set 'decision'='complete'.\n"
-            "5. Output JSON with keys: start_date, end_date, cloud_cover, geometry, place, decision, reply."
+            "You are a friendly, intelligent receptionist for a Satellite Imagery service. "
+            "Your goal is to collect 4 filters: start_date, end_date, cloud_cover, geometry.\n\n"
+            
+            f"CURRENT KNOWLEDGE: {json.dumps(llm_safe_state)}\n\n"
+
+            "INSTRUCTIONS:\n"
+            "1. BE CONVERSATIONAL. Reply to 'hey' with 'Hi! How can I help?'.\n"
+            "2. If 'geometry' is '<<VALID_GEOMETRY_ATTACHED>>' in Current Knowledge, DO NOT ask for it. It is done.\n"
+            "3. If user mentions uploading a file, reply: 'Please use the Attach Area box above.'\n"
+            "4. OUTPUT FORMAT: A JSON object with a 'reply' field.\n"
+            
+            "REQUIRED JSON STRUCTURE:\n"
+            "{\n"
+            "  \"reply\": \"Your friendly message...\",\n"
+            "  \"start_date\": \"YYYY-MM-DD\" or null,\n"
+            "  \"end_date\": \"YYYY-MM-DD\" or null,\n"
+            "  \"cloud_cover\": \"0.XX\" or null,\n"
+            "  \"geometry\": null,\n"
+            "  \"place\": \"City name\" or null,\n"
+            "  \"decision\": \"ask\" or \"complete\"\n"
+            "}"
         )
 
-        messages = [{"role":"system","content":system_prompt}] + (history or [])[-6:]
+        messages = [{"role":"system","content":system_prompt}]
+        for m in (history or [])[-6:]: messages.append(m)
         messages.append({"role":"user","content": f"User Input: {user_message}"})
 
         try:
             headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type":"application/json"}
             payload = {"model": self.model, "messages": messages, "temperature": 0.3}
             r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=30)
-            text = r.json()["choices"][0]["message"]["content"]
             
+            # --- API ERROR HANDLING ---
+            if r.status_code != 200:
+                return {"assistant_text": f"API Error {r.status_code}: {r.text}", "parsed": {}}
+            
+            data = r.json()
+            if "choices" not in data:
+                 return {"assistant_text": f"Groq Error: {data}", "parsed": {}}
+
+            text = data["choices"][0]["message"]["content"]
             parsed, _ = extract_json_from_text(text)
             
-            # Regex Fallback for Cloud Cover
+            # Fallback for Cloud Cover
             if not parsed.get("cloud_cover"):
                 m = re.search(r"(?:cloud|cover).*?([<>=]?\s*\d+(?:\.\d+)?)\s*(%|percent)?", user_message, re.I)
                 if m: parsed["cloud_cover"] = m.group(1).replace(" ", "")
 
-            assistant_text = parsed.get("reply") or text
-            if "{" in assistant_text and "}" in assistant_text:
-                try: 
-                    _, clean = extract_json_from_text(assistant_text)
-                    assistant_text = assistant_text.replace(clean, "").strip() 
-                    if assistant_text.startswith("{") or not assistant_text: assistant_text = "I've updated the filters."
-                except: pass
+            assistant_text = parsed.get("reply")
+            if not assistant_text:
+                if text.strip().startswith("{"):
+                     assistant_text = "I've noted that. What else?"
+                else:
+                     assistant_text = text
 
             return {"assistant_text": assistant_text, "parsed": parsed}
         except Exception as e:
-            return {"assistant_text": f"LLM Error: {e}", "parsed": {}}
+            return {"assistant_text": f"LLM Connection Error: {e}", "parsed": {}}
 
 # ---------- CONTROLLER ----------
 class PlanetAIAgent:
@@ -313,9 +299,17 @@ class PlanetAIAgent:
         return None
 
     def handle_turn(self, prompt):
-        # 1. Sync Uploaded Geometry to State
+        # 1. BRIDGE LOGIC: INJECT SYSTEM ALERT IF FILE UPLOADED
         if "shapefile_geometry" in st.session_state and st.session_state.shapefile_geometry:
-            st.session_state.assistant_state["geometry"] = st.session_state.shapefile_geometry
+             st.session_state.assistant_state["geometry"] = st.session_state.shapefile_geometry
+             
+             # Create the "Bridge" message
+             alert_msg = "SYSTEM ALERT: User has successfully uploaded a Shapefile. Geometry is set. Do NOT ask for geometry."
+             
+             # Prevent duplicate alerts
+             has_alert = any(m.get("content") == alert_msg for m in st.session_state.chat_history)
+             if not has_alert:
+                 st.session_state.chat_history.append({"role": "system", "content": alert_msg})
 
         # 2. Add User Msg
         st.session_state.chat_history.append({"role":"user", "content": prompt})
@@ -326,12 +320,16 @@ class PlanetAIAgent:
         # 4. Update State
         state = st.session_state.assistant_state
         p = res["parsed"]
+        
         for k in ["start_date", "end_date", "cloud_cover", "place"]:
             if p.get(k): state[k] = p[k]
         
-        if p.get("geometry"): state["geometry"] = parse_geometry_input(p["geometry"])
+        # NOTE: Only update geometry if LLM explicitly gives it.
+        # This protects the shapefile geometry from being overwritten by null.
+        if p.get("geometry"): 
+            state["geometry"] = parse_geometry_input(p["geometry"])
 
-        # 5. Handle Defaulting
+        # 5. Handle Defaulting (Place -> Coords)
         if not state.get("geometry") and (p.get("decision")=="defaulted" or "assume" in prompt.lower()):
             if state.get("place"):
                 loc = self.geocode(state["place"])
@@ -357,7 +355,10 @@ class PlanetAIAgent:
 
         url = "https://api.planet.com/data/v1/quick-search"
         r = requests.post(url, auth=(PLANET_API_KEY, ""), json=body)
-        r.raise_for_status()
+        
+        if r.status_code != 200:
+             raise ValueError(f"Planet API Error {r.status_code}: {r.text}")
+
         feats = r.json().get("features", [])
         save_metadata_to_db(feats)
         return feats
@@ -417,13 +418,15 @@ def main():
             geom, err = handle_shapefile_upload(uploaded)
             if geom:
                 st.session_state.shapefile_geometry = geom
-                st.success("✅ Geometry Attached! The assistant will see this.")
+                st.success("✅ Geometry Attached!")
             else:
                 st.error(err)
 
     # Chat
     for msg in st.session_state.chat_history:
-        st.chat_message(msg["role"]).write(msg["content"])
+        # Hide the technical system alerts from the UI to keep it clean
+        if msg["role"] != "system":
+            st.chat_message(msg["role"]).write(msg["content"])
 
     if prompt := st.chat_input("Ex: Show me images with < 10% clouds..."):
         res = agent.handle_turn(prompt)

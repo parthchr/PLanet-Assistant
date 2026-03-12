@@ -1,19 +1,17 @@
-# planetAgent_final.py
+# planetAgent_deployed.py
 """
-Planet API Assistant (COMPLETED INTEGRATED VERSION)
+Planet API Assistant (DEPLOYMENT READY)
 
 Features:
-  - ORIGINAL: Humanlike/Receptionist Chat (Groq/Llama3)
-  - ORIGINAL: Full Metadata Database Storage (SQLite)
-  - ORIGINAL: Planet API Search
-  - NEW: VLM Image Preview & Summarization (Ollama/LLaVA)
-  - NEW: Shapefile Upload (.zip) for AOI
-  - NEW: Image Clipping (Crops thumbnail to your AOI)
+  - HUMANLIKE CHAT: Groq/Llama3
+  - PERSISTENT DB: Auto-switches between SQLite (Local) and PostgreSQL (Heroku/Cloud)
+  - PLANET SEARCH: Full Metadata search
+  - VLM ANALYSIS: Uses Hugging Face API (BLIP Model) instead of local Ollama
+  - GEOSPATIAL: Shapefile Upload (.zip) + Image Clipping
 
 Usage:
-  - Put PLANET_API_KEY and GROQ_API_KEY in .env
-  - Run: streamlit run planetAgent_final.py
-  - REQUIRES OLLAMA to be running locally with 'llava' model pulled.
+  - Local: Put PLANET_API_KEY, GROQ_API_KEY, and HF_TOKEN in .env
+  - Cloud: Set these as Config Vars in Heroku/Streamlit Cloud
 """
 import os
 import re
@@ -34,10 +32,17 @@ import geopandas as gpd
 from shapely.geometry import shape, box
 from PIL import Image
 
+# Try importing psycopg2 for Postgres (Cloud), fail silently if local only
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
 # ---------- Load env ----------
 load_dotenv()
 PLANET_API_KEY = os.getenv("PLANET_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN") # REQUIRED for VLM in Cloud
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 try:
     LLM_TEMP = float(os.getenv("LLM_TEMP", "0.3"))
@@ -46,13 +51,24 @@ except Exception:
 
 st.set_page_config(page_title="Planet Assistant", layout="wide")
 
-# ---------- DB (ORIGINAL COMPLEX SCHEMA) ----------
+# ---------- DB (HYBRID SQLITE / POSTGRES) ----------
 DB_PATH = "planet_metadata.db"
 
+def get_db_connection():
+    """Connects to Postgres if DATABASE_URL is set, else SQLite."""
+    db_url = os.getenv("DATABASE_URL")
+    if db_url and psycopg2:
+        return psycopg2.connect(db_url, sslmode='require')
+    return sqlite3.connect(DB_PATH)
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("""
+    
+    # Postgres/SQLite compatible CREATE TABLE
+    # Note: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' works in both.
+    # 'REAL' works in both (maps to float4/8 in PG).
+    query = """
         CREATE TABLE IF NOT EXISTS metadata (
             id TEXT PRIMARY KEY,
             item_type TEXT,
@@ -86,12 +102,13 @@ def init_db():
             full_metadata TEXT,
             saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+    """
+    c.execute(query)
     conn.commit()
     conn.close()
 
 def reset_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("DROP TABLE IF EXISTS metadata")
     conn.commit()
@@ -100,8 +117,9 @@ def reset_db():
 
 def save_metadata_to_db(metadata_list):
     if not metadata_list: return
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
+    
     cols = [
         "id","item_type","acquired","anomalous_pixels","clear_confidence_percent",
         "clear_percent","cloud_cover","cloud_percent","ground_control","gsd",
@@ -111,8 +129,21 @@ def save_metadata_to_db(metadata_list):
         "sun_azimuth","sun_elevation","updated","view_angle","visible_confidence_percent",
         "visible_percent","geometry","full_metadata"
     ]
-    placeholders = ",".join(["?"]*len(cols))
-    sql = f"INSERT OR REPLACE INTO metadata ({','.join(cols)}) VALUES ({placeholders})"
+    
+    # DETERMINE PLACEHOLDER STYLE
+    # SQLite uses '?', Postgres uses '%s'
+    is_postgres = bool(os.getenv("DATABASE_URL"))
+    ph = "%s" if is_postgres else "?"
+    placeholders = ",".join([ph]*len(cols))
+    
+    sql = f"INSERT INTO metadata ({','.join(cols)}) VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING"
+    # Note: "ON CONFLICT" works in Postgres 9.5+ and SQLite 3.24+. 
+    # If using older SQLite, use "INSERT OR IGNORE" but standardizing is tricky.
+    # For compatibility, we will try standard INSERT and ignore duplicate errors.
+    
+    if not is_postgres:
+         sql = f"INSERT OR REPLACE INTO metadata ({','.join(cols)}) VALUES ({placeholders})"
+
     for item in metadata_list:
         p = item.get("properties", {}) or {}
         geom = item.get("geometry")
@@ -151,6 +182,7 @@ def save_metadata_to_db(metadata_list):
         try:
             c.execute(sql, row)
         except Exception as e:
+            # print(f"DB Error: {e}") 
             continue
     conn.commit()
     conn.close()
@@ -203,22 +235,16 @@ def create_small_bbox_polygon_from_point(lat, lon, half_km=2.74):
     coords = [[min_lon, min_lat],[max_lon, min_lat],[max_lon, max_lat],[min_lon, max_lat],[min_lon, min_lat]]
     return {"type":"Polygon","coordinates":[coords]}
 
-# ### <<< NEW FEATURE: Shapefile Handling >>>
+# ---------- Shapefile Handling (PRESERVED) ----------
 def handle_shapefile_upload(uploaded_file):
-    """
-    Extracts geometry from an uploaded zip file (Shapefile).
-    Returns GeoJSON dict (Polygon/MultiPolygon).
-    """
     try:
         with tempfile.TemporaryDirectory() as tmpdirname:
-            # Save and unzip
             zip_path = os.path.join(tmpdirname, "uploaded.zip")
             with open(zip_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmpdirname)
             
-            # Find .shp file
             shp_file = None
             for root, dirs, files in os.walk(tmpdirname):
                 for file in files:
@@ -230,13 +256,10 @@ def handle_shapefile_upload(uploaded_file):
             if not shp_file:
                 return None, "No .shp file found in the zip."
             
-            # Read with geopandas
             gdf = gpd.read_file(shp_file)
             if gdf.crs != "EPSG:4326":
                 gdf = gdf.to_crs("EPSG:4326")
             
-            # Convert to GeoJSON geometry
-            # Using the convex hull of all shapes combined to get a single search geometry
             combined = gdf.unary_union
             geom_json = json.loads(json.dumps(combined.__geo_interface__))
             return geom_json, None
@@ -377,7 +400,6 @@ class PlanetAIAgent:
 
         st.session_state.chat_history.append({"role":"user","content":user_prompt})
 
-        # Check for uploaded shapefile geometry in session state (set by UI)
         if "shapefile_geometry" in st.session_state and st.session_state.shapefile_geometry:
              st.session_state.assistant_state["geometry"] = st.session_state.shapefile_geometry
 
@@ -407,7 +429,6 @@ class PlanetAIAgent:
             gp_parsed = parse_geometry_input(gp) if isinstance(gp, str) else gp
             if gp_parsed: state["geometry"] = gp_parsed
 
-        # Assume Logic
         user_low = user_prompt.lower()
         if any(p in user_low for p in ["assume", "don't have coordinates"]) and not state.get("geometry"):
             place = state.get("place")
@@ -448,59 +469,40 @@ def build_planet_api_body(filters: dict):
         body["filter"]["config"].append({"type":"GeometryFilter","field_name":"geometry","config":geom})
     return body
 
-# ### <<< NEW FEATURE: Clipping Logic >>>
+# ---------- Clipping & VLM (UPDATED FOR DEPLOYMENT) ----------
 def clip_image_to_geometry(image_bytes, image_geometry, clip_geometry):
-    """
-    Crops the image (which covers image_geometry) to the clip_geometry (user AOI).
-    This is an approximation using bounding boxes for speed on standard thumbnails.
-    """
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        
-        # Get bounds of the full satellite image
         img_shape = shape(image_geometry)
         minx, miny, maxx, maxy = img_shape.bounds
-        
-        # Get bounds of the clip geometry (user's AOI)
         clip_shape = shape(clip_geometry)
         c_minx, c_miny, c_maxx, c_maxy = clip_shape.bounds
 
-        # Calculate pixel dimensions
         width, height = img.size
-        
-        # Calculate scaling factors
         x_scale = width / (maxx - minx)
         y_scale = height / (maxy - miny)
         
-        # Calculate pixel coordinates for the crop
-        # Note: Latitude (y) is usually inverted in pixel coords (0 at top) vs Map coords (0 at equator)
-        # But for simple bbox crop on un-projected thumbnail, we map relative positions.
-        
         left = int((c_minx - minx) * x_scale)
         right = int((c_maxx - minx) * x_scale)
-        # Y is inverted: maxy matches pixel 0
         top = int((maxy - c_maxy) * y_scale)
         bottom = int((maxy - c_miny) * y_scale)
         
-        # Clamp values
         left = max(0, left)
         top = max(0, top)
         right = min(width, right)
         bottom = min(height, bottom)
         
         if right <= left or bottom <= top:
-            return image_bytes # Return original if crop is invalid
+            return image_bytes 
             
         cropped_img = img.crop((left, top, right, bottom))
-        
-        # Convert back to bytes
         buf = io.BytesIO()
         cropped_img.save(buf, format="PNG")
         return buf.getvalue()
 
     except Exception as e:
         print(f"Clipping error: {e}")
-        return image_bytes # Return original on failure
+        return image_bytes
 
 def fetch_thumbnail(thumbnail_url, api_key):
     try:
@@ -513,19 +515,33 @@ def fetch_thumbnail(thumbnail_url, api_key):
         return None
 
 def get_vlm_summary(image_bytes):
+    """
+    CLOUD VERSION: Uses Hugging Face API instead of local Ollama.
+    Model: Salesforce/blip-image-captioning-large (Free Tier Friendly)
+    """
+    if not HF_TOKEN:
+        return "⚠️ Error: HF_TOKEN missing. Cannot run VLM analysis."
+
+    API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+
     try:
-        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-        ollama_url = "http://localhost:11434/api/generate"
-        payload = {"model": "llava", "prompt": "Describe this satellite image in a single, concise paragraph.", "images": [encoded_image], "stream": False}
-        response = requests.post(ollama_url, json=payload, timeout=60)
+        response = requests.post(API_URL, headers=headers, data=image_bytes, timeout=30)
         response.raise_for_status()
-        return response.json().get("response", "No summary").strip()
+        data = response.json()
+        
+        # HF Inference usually returns a list dict: [{'generated_text': '...'}]
+        if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
+            return data[0]["generated_text"]
+        
+        return "No caption generated."
+        
     except Exception as e:
-        return f"VLM Error: {e}"
+        return f"Hugging Face API Error: {e}"
 
 # ---------- Streamlit UI ----------
 def main():
-    st.title("🌍 Planet API Assistant (Integrated w/ Shapefiles & Clipping)")
+    st.title("🌍 Planet API Assistant (Deployed Version)")
 
     # Sidebar
     st.sidebar.markdown("## Controls")
@@ -534,7 +550,6 @@ def main():
         reset_db()
         st.rerun()
     
-    # ### <<< NEW FEATURE: Shapefile Upload in Sidebar >>>
     st.sidebar.markdown("### 1. Upload Area (Optional)")
     uploaded_shp = st.sidebar.file_uploader("Upload .zip Shapefile", type="zip")
     if uploaded_shp:
@@ -544,7 +559,7 @@ def main():
                 st.session_state.shapefile_geometry = geom
                 if "assistant_state" not in st.session_state: st.session_state.assistant_state = {}
                 st.session_state.assistant_state["geometry"] = geom
-                st.sidebar.success("✅ Shapefile loaded! Tell the chat to search.")
+                st.sidebar.success("✅ Shapefile loaded!")
             else:
                 st.sidebar.error(f"Shapefile Error: {err}")
 
@@ -553,7 +568,6 @@ def main():
     
     if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
-    # Chat Interface
     for msg in st.session_state.chat_history:
         st.chat_message(msg["role"]).write(msg["content"])
 
@@ -561,15 +575,10 @@ def main():
         result = agent.handle_user_prompt(user_text)
         st.rerun()
 
-    # Results Display
-    # Logic to show results if they exist (handling the rerun flow)
-    # Re-instating the logic from previous steps to display assistant response just after input
-    
     if "features" in st.session_state:
         features = st.session_state.features
         st.markdown(f"### Results ({len(features)})")
         
-        # Table Header
         c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
         c1.write("**ID**"); c2.write("**Date**"); c3.write("**Cloud**"); c4.write("**Action**")
         
@@ -579,16 +588,13 @@ def main():
             col2.write(f["properties"]["acquired"])
             col3.write(f["properties"]["cloud_cover"])
             
-            # Eye Button
             if col4.button("👁️", key=f["id"]):
                 t_url = f["_links"]["thumbnail"]
                 if t_url:
-                    with st.spinner("Fetching, Clipping & Analyzing..."):
-                        # 1. Fetch
+                    with st.spinner("Fetching, Clipping & Analyzing (via Hugging Face)..."):
                         raw_bytes = fetch_thumbnail(t_url, PLANET_API_KEY)
                         
                         if raw_bytes:
-                            # 2. Clip (NEW FEATURE)
                             final_image = raw_bytes
                             user_geom = st.session_state.assistant_state.get("geometry")
                             feat_geom = f["geometry"]
@@ -596,7 +602,6 @@ def main():
                             if user_geom:
                                 final_image = clip_image_to_geometry(raw_bytes, feat_geom, user_geom)
                             
-                            # 3. VLM
                             summary = get_vlm_summary(final_image)
                             
                             st.session_state.active_preview = {
@@ -608,7 +613,6 @@ def main():
                 else:
                     st.error("No thumbnail link.")
 
-        # Active Preview
         if "active_preview" in st.session_state:
             p = st.session_state.active_preview
             with st.expander(f"Analysis: {p['id']}", expanded=True):

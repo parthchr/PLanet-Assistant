@@ -1,9 +1,8 @@
 streamlit
 requests
+geopandas
+shapely
 geopy
 python-dotenv
-shapely
-geopandas
-Pillow
-psycopg2-binary
-huggingface_hub
+folium
+streamlit-folium
