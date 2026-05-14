@@ -1,5 +1,6 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
 .env
+.streamlit/secrets.toml
 __pycache__/
-*.zip
 planet_metadata.db
+*.zip
+venv/
