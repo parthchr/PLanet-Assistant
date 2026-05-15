@@ -639,8 +639,12 @@ def main():
     db = DatabaseManager(AppConfig.DB_PATH)
     agent = PlanetAIAgent(AppConfig.GROQ_API_KEY)
     
-    st.set_page_config(page_title="Planet API Assistant", layout="wide")
-    st.title("🌍 Planet API Assistant")
+    st.markdown("""
+        <div style='border-bottom: 1px solid #4a4a4a; padding-bottom: 10px; margin-bottom: 20px;'>
+            <h1 style='margin-bottom: 0px;'>🌍 Planet API Assistant</h1>
+            <p style='color: #888; font-size: 1.1em; margin-top: 5px;'>Enterprise Satellite Data Discovery Chatbot</p>
+        </div>
+    """, unsafe_allow_html=True)
 
     if "assistant_state" not in st.session_state:
         st.session_state.assistant_state = {"start_date": None, "end_date": None, "cloud_cover": None, "geometry": None, "place": None}
