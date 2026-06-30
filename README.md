@@ -77,7 +77,11 @@ streamlit run app.py
 The app will launch in your browser at http://localhost:8501.
 
 # ☁️ Cloud Deployment (AWS EC2)
-## To deploy this application to a production environment like AWS: Provision an Ubuntu instance to handle geospatial processing. Open port 8501 in your AWS Security Group. Install dependencies: sudo apt update && sudo apt install python3-pip python3-venv mysql-server -y Configure the MySQL database with a dedicated appuser to bypass Ubuntu root restrictions. Clone the repository, manually create the .env file on the server, and install requirements.txt. Use a terminal multiplexer like tmux to keep the Streamlit app running in the background:
+To deploy this application to a production environment like AWS: Provision an Ubuntu instance to handle geospatial processing.
+Open port 8501 in your AWS Security Group. 
+Install dependencies: sudo apt update && sudo apt install python3-pip python3-venv mysql-server -y Configure the MySQL database with a dedicated appuser to bypass Ubuntu root restrictions. 
+Clone the repository, manually create the .env file on the server, and install requirements.txt. 
+Use a terminal multiplexer like tmux to keep the Streamlit app running in the background:
 Bash
 ```
 tmux new -s planetapp
@@ -85,11 +89,7 @@ streamlit run app.py
 ```
 # 📖 How to Use the Platform
 ## Authentication: Upon visiting the site, create a secure account or log in.
-
 ## Define Area: Upload a Shapefile (.zip) in the left sidebar, or type a location name into the chat.
-
 ## Query: Tell the AI what you are looking for (e.g., "Give me images from May 2024 with under 10% cloud cover").
-
 ## Analyze: Review the coverage map. Click "👁️ Add to Analysis" on any scene in the results table to download its thumbnail and generate an AI summary of the scene's quality.
-
 ## Reset: Click "Start New Chat" in the sidebar to flush the SQLite cache and begin a new search.
