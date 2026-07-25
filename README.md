@@ -5,6 +5,8 @@ An intelligent, multi-tier geospatial data discovery platform. This application 
 ## 🚀 Overview
 Traditionally, finding the right satellite imagery requires complex API queries or heavy GIS software. This platform democratizes geospatial analysis by integrating the **Planet API** with the **Groq LLM (LLaMA3)**. Users can simply type what they are looking for (e.g., "Find clear images of this region from last week"), and the AI translates the intent into precise API parameters, retrieves the metadata, maps it, and generates automated intelligence reports.
 
+## 📸 Application Screenshots
+
 ## ✨ Key Features
 * **Natural Language Data Mining:** Chat interface to query satellite imagery without writing code.
 * **Shapefile Integration:** Upload custom `.zip` shapefiles to instantly define complex Areas of Interest (AOIs).
