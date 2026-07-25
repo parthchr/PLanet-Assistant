@@ -14,7 +14,7 @@ Traditionally, finding the right satellite imagery requires complex API queries 
 ![App ChatUI](assets/Chatinterface.png)
 
 ### Coverage Map with scenes collected
-![Coverage Map](assets/folliummap.png)
+![Coverage Map](assets/foliummap.png)
 
 ### Satellite Scenes collected
 ![Satellite Scenes collected](assets/satellitescenescollected.png)
