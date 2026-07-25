@@ -23,7 +23,7 @@ Traditionally, finding the right satellite imagery requires complex API queries 
 ![Filters collected using LLM](assets/filterscollected.png)
 
 ###  AI Analysis
-![ AI Analysis](assets/scene_ai_summary.png)
+![AI Analysis](assets/scene_ai_summary.png)
 
 ## ✨ Key Features
 * **Natural Language Data Mining:** Chat interface to query satellite imagery without writing code.
