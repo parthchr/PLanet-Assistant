@@ -7,6 +7,24 @@ Traditionally, finding the right satellite imagery requires complex API queries 
 
 ## 📸 Application Screenshots
 
+### Homepage and login
+![App Homepage](assets/homepage.png)
+
+### Dashboard and chat interface
+![App ChatUI](assets/Chatinterface.png)
+
+### Coverage Map with scenes collected
+![Coverage Map](assets/folliummap.png)
+
+### Satellite Scenes collected
+![Satellite Scenes collected](assets/satellitescenescollected.png)
+
+### Filters collected using LLM
+![Filters collected using LLM](assets/filterscollected.png)
+
+###  AI Analysis
+![ AI Analysis](assets/scene_ai_summary.png)
+
 ## ✨ Key Features
 * **Natural Language Data Mining:** Chat interface to query satellite imagery without writing code.
 * **Shapefile Integration:** Upload custom `.zip` shapefiles to instantly define complex Areas of Interest (AOIs).
