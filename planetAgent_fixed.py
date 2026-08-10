@@ -37,6 +37,7 @@ import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import mapping, shape
+from shapely.geometry.polygon import orient
 from geopy.geocoders import Nominatim
 from math import cos, radians, sqrt
 from dotenv import load_dotenv
@@ -281,6 +282,9 @@ class GeoProcessor:
                     geom = geom.simplify(tolerance=tol, preserve_topology=True)
                     tol *= 1.5 
                  
+                # RFC 7946 requires the exterior ring to be counter-clockwise.
+                # Shapefiles are conventionally clockwise, which Planet's API rejects with a 400.
+                geom = orient(geom, sign=1.0)
                 return mapping(geom), None
 
         except Exception as e:
@@ -512,7 +516,12 @@ class PlanetAIAgent:
         auth = HTTPBasicAuth(AppConfig.PLANET_API_KEY, "")
         headers = {"Content-Type": "application/json"}
         response = requests.post(AppConfig.PLANET_DATA_URL, auth=auth, headers=headers, json=body, timeout=90)
-        response.raise_for_status()
+        if not response.ok:
+            try:
+                detail = response.json()
+            except ValueError:
+                detail = response.text
+            raise RuntimeError(f"Planet API error {response.status_code}: {detail}")
         
         data = response.json()
         features = data.get("features", [])
@@ -691,7 +700,7 @@ def main():
                 if is_latest:
                     st.success("Currently Active Selection on Map")
                 if pdata["img"]:
-                    st.image(pdata["img"], use_column_width=True)
+                    st.image(pdata["img"], use_container_width=True)
                 st.markdown(pdata["sum"])
 
     # --- CHAT UI ---

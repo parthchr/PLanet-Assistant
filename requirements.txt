@@ -1,4 +1,4 @@
-streamlit
+streamlit==1.61.1
 requests
 geopandas
 shapely
@@ -7,3 +7,4 @@ python-dotenv
 folium
 streamlit-folium
 bcrypt
+psycopg2-binary
