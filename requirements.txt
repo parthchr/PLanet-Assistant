@@ -6,3 +6,4 @@ geopy
 python-dotenv
 folium
 streamlit-folium
+bcrypt

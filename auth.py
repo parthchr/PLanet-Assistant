@@ -1,60 +1,70 @@
 # auth.py
-import mysql.connector
+import os
+import sqlite3
 import bcrypt
 import streamlit as st
 
-# Update with your local MySQL credentials
-db_config = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '1234', 
-    'database': 'planet_app'
-}
+DB_PATH = os.getenv("AUTH_DB_PATH", "auth.db")
+
 
 def get_connection():
-    """Establishes a connection to the MySQL database."""
-    try:
-        return mysql.connector.connect(**db_config)
-    except mysql.connector.Error as err:
-        st.error(f"Database Error: {err}")
-        return None
+    """Opens a connection to the local SQLite auth database."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def create_user(username, email, plain_password):
-    """Hashes the password and saves the new user to MySQL."""
+
+def init_db():
+    """Creates the users table if it doesn't exist yet."""
     conn = get_connection()
-    if not conn: return False
-
-    # Hash the password securely
-    hashed = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
-    
-    cursor = conn.cursor()
-    try:
-        sql = "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s)"
-        cursor.execute(sql, (username, email, hashed.decode('utf-8')))
-        conn.commit()
-        return True
-    except mysql.connector.IntegrityError:
-        # This catches duplicate usernames
-        return False
-    finally:
-        cursor.close()
-        conn.close()
-
-def verify_login(username, plain_password):
-    """Fetches the user from MySQL and verifies the hashed password."""
-    conn = get_connection()
-    if not conn: return False
-
-    cursor = conn.cursor(dictionary=True)
-    sql = "SELECT * FROM users WHERE username = %s"
-    cursor.execute(sql, (username,))
-    user = cursor.fetchone()
-    
-    cursor.close()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
     conn.close()
 
-    if user:
-        # Compare the provided password against the stored hash
-        if bcrypt.checkpw(plain_password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+
+init_db()
+
+
+def create_user(username, email, plain_password):
+    """Hashes the password and saves the new user to SQLite."""
+    conn = get_connection()
+    hashed = bcrypt.hashpw(plain_password.encode("utf-8"), bcrypt.gensalt())
+    try:
+        conn.execute(
+            "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+            (username, email, hashed.decode("utf-8")),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        # Duplicate username
+        return False
+    except sqlite3.Error as err:
+        st.error(f"Database Error: {err}")
+        return False
+    finally:
+        conn.close()
+
+
+def verify_login(username, plain_password):
+    """Fetches the user from SQLite and verifies the hashed password."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = ?", (username,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row:
+        if bcrypt.checkpw(plain_password.encode("utf-8"), row["password_hash"].encode("utf-8")):
             return True
     return False
