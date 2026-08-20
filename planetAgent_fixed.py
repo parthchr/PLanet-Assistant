@@ -614,7 +614,7 @@ class PlanetAIAgent:
 # --- UTILS ---
 def fetch_thumbnail(url, key):
     try:
-        r = requests.get(url, auth=HTTPBasicAuth(key, ""), timeout=30)
+        r = requests.post(url, auth=HTTPBasicAuth(key, ""), timeout=30)
         r.raise_for_status()
         return r.content
     except Exception: return None
